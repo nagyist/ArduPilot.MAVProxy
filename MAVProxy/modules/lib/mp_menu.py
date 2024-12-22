@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 menu handling widgets for wx
 
@@ -280,7 +280,12 @@ class MPMenuTop(object):
             if m.name == submenu_path[0]:
                 m.add_to_submenu(submenu_path[1:], item)
                 return
-        raise(ValueError("No submenu (%s) found" % (submenu_path[0])))
+        # new submenu
+        if len(submenu_path) > 1:
+            self.add(MPMenuSubMenu(submenu_path[0], []))
+            self.add_to_submenu(submenu_path, item)
+        else:
+            self.add(MPMenuSubMenu(submenu_path[0], [item]))
 
     def wx_menu(self):
         '''return a wx.MenuBar() for the menu'''
@@ -329,22 +334,63 @@ class MPMenuCallFileDialog(object):
             return None
         return "\"" + dlg.GetPath() + "\""
 
+
+class MPMenuCallDirDialog(object):
+    '''used to create a file folder dialog callback'''
+    def __init__(self, flags=None, title='Directory'):
+        self.title = title
+
+    def call(self):
+        '''show a directory chooser dialog'''
+        from MAVProxy.modules.lib.wx_loader import wx
+
+        dlg = wx.DirDialog(None, self.title, '')
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+        return "\"" + dlg.GetPath() + "\""
+
+
 class MPMenuCallTextDialog(object):
     '''used to create a value dialog callback'''
-    def __init__(self, title='Enter Value', default=''):
+    def __init__(self, title='Enter Value', default='', settings=None):
         self.title = title
         self.default = default
+        self.settings = settings
 
     def call(self):
         '''show a value dialog'''
         from MAVProxy.modules.lib.wx_loader import wx
+        title = self.title
+        if title.find('FLYTOFRAMEUNITS') != -1 and self.settings is not None:
+            frameunits = "%s %s" % (self.settings.flytoframe, self.settings.height_unit)
+            title = title.replace('FLYTOFRAMEUNITS', frameunits)
         try:
-            dlg = wx.TextEntryDialog(None, self.title, self.title, defaultValue=str(self.default))
+            dlg = wx.TextEntryDialog(None, title, title, defaultValue=str(self.default))
         except TypeError:
-            dlg = wx.TextEntryDialog(None, self.title, self.title, value=str(self.default))
+            dlg = wx.TextEntryDialog(None, title, title, value=str(self.default))
         if dlg.ShowModal() != wx.ID_OK:
             return None
         return dlg.GetValue()
+
+class MPMenuConfirmDialog(object):
+    '''used to create a confirmation dialog'''
+    def __init__(self, title='Confirmation', message='', callback=None, args=None):
+        self.title = title
+        self.message = message
+        self.callback = callback
+        self.args = args
+        t = multiproc.Process(target=self.thread)
+        t.start()
+
+    def thread(self):
+        mp_util.child_close_fds()
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+        app = wx.App(False)
+        dlg = wx.MessageDialog(None, self.title, self.message, wx.YES|wx.NO)
+        ret = dlg.ShowModal()
+        if ret == wx.ID_YES and self.callback is not None:
+            self.callback(self.args)
 
 class MPMenuChildMessageDialog(object):
     '''used to create a message dialog in a child process'''

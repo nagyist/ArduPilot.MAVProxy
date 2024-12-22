@@ -30,9 +30,16 @@ if exist "..\..\pymavlink" (
  )
 )
 
+rem -----Install additional Python packages-----
+python.exe -m pip install -U wheel setuptools pip
+python.exe -m pip install pywin32 lxml pymavlink numpy matplotlib pyserial opencv-python PyYAML Pygame Pillow wxpython prompt-toolkit scipy
+python.exe -m pip install -U openai wave pyaudio
+python.exe -m pip install -U pyinstaller==6.7.0 packaging 
+python.exe -m pip install -U requests
+
 rem -----Build MAVProxy-----
 cd ..\
-python.exe -m pip install . --user
+python.exe -m pip install .[recommended] --user
 cd .\MAVProxy
 copy ..\windows\mavproxy.spec
 pyinstaller -y --clean mavproxy.spec
@@ -51,10 +58,7 @@ powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Parame
 powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Parameters/ArduPlane/apm.pdef.xml' -Destination 'Parameters\ArduPlane.xml'"
 powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Parameters/ArduSub/apm.pdef.xml' -Destination 'Parameters\ArduSub.xml'"
 powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Parameters/AntennaTracker/apm.pdef.xml' -Destination 'Parameters\AntennaTracker.xml'"
-powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Rover-defaults.parm' -Destination 'Parameters\Rover-defaults.parm'"
-powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Copter-defaults.parm' -Destination 'Parameters\ArduCopter-defaults.parm'"
-powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Plane-defaults.parm' -Destination 'Parameters\ArduPlane-defaults.parm'"
-powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Sub-defaults.parm' -Destination 'Parameters\ArduSub-defaults.parm'"
+powershell.exe "Start-BitsTransfer -Source 'http://autotest.ardupilot.org/Parameters/Heli/apm.pdef.xml' -Destination 'Parameters\Heli.xml'"
 
 rem -----Build the Installer-----
 cd .\windows

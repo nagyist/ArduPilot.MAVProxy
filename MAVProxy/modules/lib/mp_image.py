@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from __future__ import print_function
 
@@ -13,6 +13,8 @@ from MAVProxy.modules.lib.wx_loader import wx
 import cv2
 import numpy as np
 import warnings
+from threading import Thread
+import math
 
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.lib import mp_widgets
@@ -65,11 +67,122 @@ class MPImageNewSize:
     def __init__(self, size):
         self.size = size
 
+class MPImageFPSMax:
+    '''set maximum frame rate'''
+    def __init__(self, fps_max):
+        self.fps_max = fps_max
+
+class MPImageSeekPercent:
+    '''seek video to given percentage'''
+    def __init__(self, percent):
+        self.percent = percent
+
+class MPImageSeekFrame:
+    '''seek video to given frame'''
+    def __init__(self, frame):
+        self.frame = frame
+        
 class MPImageRecenter:
     '''recenter on location'''
     def __init__(self, location):
         self.location = location
 
+class MPImageGStreamer:
+    '''request getting image feed from gstreamer pipeline'''
+    def __init__(self, pipeline):
+        self.pipeline = pipeline
+
+class MPImageVideo:
+    '''request getting image feed from video file'''
+    def __init__(self, filename):
+        self.filename = filename
+        
+class MPImageColormap:
+    '''set a colormap for display'''
+    def __init__(self, colormap):
+        self.colormap = colormap
+
+class MPImageColormapIndex:
+    '''set a colormap index for display'''
+    def __init__(self, colormap_index):
+        self.colormap_index = colormap_index
+        
+class MPImageStartTracker:
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+class MPImageTrackPos:
+    def __init__(self, x, y, shape):
+        self.x = x
+        self.y = y
+        self.shape = shape
+
+class MPImageEndTracker:
+    def __init__(self):
+        pass
+
+class MPImageFrameCounter:
+    '''frame counter'''
+    def __init__(self, frame):
+        self.frame = frame
+
+class MPImageOSD_Element:
+    '''an OSD element'''
+    def __init__(self, label):
+        self.label = label
+
+    def draw(self, data):
+        pass
+
+class MPImageOSD_None(MPImageOSD_Element):
+    def __init__(self, label):
+        super().__init__(label)
+
+class MPImageOSD_Line(MPImageOSD_Element):
+    '''an OSD line.
+    p1 and p2 are (x,y) tuples
+    top left is (0,0), bottom right is (1,1)'''
+    def __init__(self, label, p1, p2, color, thickness=1):
+        super().__init__(label)
+        self.p1 = p1
+        self.p2 = p2
+        self.color = color
+        self.thickness = thickness
+
+    def draw(self, data):
+        height,width,_ = data.shape
+        start_point = (int(self.p1[0]*width), int(self.p1[1]*height))
+        end_point = (int(self.p2[0]*width), int(self.p2[1]*height))
+        return cv2.line(data, start_point, end_point, self.color, self.thickness)
+        
+
+class MPImageOSD_HorizonLine(MPImageOSD_Element):
+    '''an OSD horizon line from roll/pitch eulers in degrees and horizontal FOV'''
+    def __init__(self, label, roll_deg, pitch_deg, hfov, color, thickness=1):
+        super().__init__(label)
+        self.roll_deg = roll_deg
+        self.pitch_deg = pitch_deg
+        self.hfov = hfov
+        self.color = color
+        self.thickness = thickness
+
+    def draw(self, data):
+        height,width,_ = data.shape
+        vfov = (self.hfov * height) / width
+        pitch_line = 0.5 + 0.5 * self.pitch_deg / (0.5*vfov)
+        p1 = (0, pitch_line)
+        p2 = (1, pitch_line)
+        corner_angle_deg = math.degrees(math.atan(vfov / self.hfov))
+        roll_change = 0.5 * self.roll_deg / corner_angle_deg
+        p1 = (p1[0], p1[1] + roll_change)
+        p2 = (p2[0], p2[1] - roll_change)
+        start_point = (int(p1[0]*width), int(p1[1]*height))
+        end_point = (int(p2[0]*width), int(p2[1]*height))
+        return cv2.line(data, start_point, end_point, self.color, self.thickness)
+        
 class MPImage():
     '''
     a generic image viewer widget for use in MP tools
@@ -81,22 +194,28 @@ class MPImage():
                  can_zoom = False,
                  can_drag = False,
                  mouse_events = False,
+                 mouse_movement_events = False,
                  key_events = False,
                  auto_size = False,
                  report_size_changes = False,
-                 daemon = False):
+                 daemon = False,
+                 auto_fit = False,
+                 fps = 10):
 
         self.title = title
-        self.width = width
-        self.height = height
+        self.width = int(width)
+        self.height = int(height)
         self.can_zoom = can_zoom
         self.can_drag = can_drag
         self.mouse_events = mouse_events
+        self.mouse_movement_events = mouse_movement_events
         self.key_events = key_events
         self.auto_size = auto_size
+        self.auto_fit = auto_fit
         self.report_size_changes = report_size_changes
         self.menu = None
         self.popup_menu = None
+        self.fps = fps
 
         self.in_queue = multiproc.Queue()
         self.out_queue = multiproc.Queue()
@@ -135,6 +254,18 @@ class MPImage():
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self.in_queue.put(MPImageData(img))
 
+    def set_fps_max(self, fps_max):
+        '''set the maximum frame rate'''
+        self.in_queue.put(MPImageFPSMax(fps_max))
+
+    def seek_percentage(self, percent):
+        '''seek to the given video percentage'''
+        self.in_queue.put(MPImageSeekPercent(percent))
+
+    def seek_frame(self, frame):
+        '''seek to the given video frame'''
+        self.in_queue.put(MPImageSeekFrame(frame))
+        
     def set_title(self, title):
         '''set the frame title'''
         self.in_queue.put(MPImageTitle(title))
@@ -184,7 +315,35 @@ class MPImage():
     def set_layout(self, layout):
         '''set window layout'''
         self.in_queue.put(layout)
-    
+
+    def set_gstreamer(self, pipeline):
+        '''set gstreamer pipeline source'''
+        self.in_queue.put(MPImageGStreamer(pipeline))
+
+    def set_video(self, filename):
+        '''set video file source'''
+        self.in_queue.put(MPImageVideo(filename))
+        
+    def set_colormap(self, colormap):
+        '''set a colormap for greyscale data'''
+        self.in_queue.put(MPImageColormap(colormap))
+
+    def set_colormap_index(self, colormap_index):
+        '''set a colormap index for greyscale data'''
+        self.in_queue.put(MPImageColormapIndex(colormap_index))
+        
+    def start_tracker(self, x, y, width, height):
+        '''start a tracker'''
+        self.in_queue.put(MPImageStartTracker(x, y, width, height))
+
+    def end_tracking(self):
+        '''end a tracker'''
+        self.in_queue.put(MPImageEndTracker())
+
+    def add_OSD(self, osd_element):
+        '''add an OSD element'''
+        self.in_queue.put(osd_element)
+        
     def events(self):
         '''check for events a list of events'''
         ret = []
@@ -238,7 +397,7 @@ class MPImagePanel(wx.Panel):
         self.redraw_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_redraw_timer, self.redraw_timer)
         self.Bind(wx.EVT_SET_FOCUS, self.on_focus)
-        self.redraw_timer.Start(100)
+        self.redraw_timer.Start(int(1000/state.fps))
 
         self.mouse_down = None
         self.drag_step = 10
@@ -249,6 +408,16 @@ class MPImagePanel(wx.Panel):
         self.popup_pos = None
         self.last_size = None
         self.done_PIL_warning = False
+        self.colormap = None
+        self.colormap_index = None
+        self.raw_img = None
+        self.tracker = None
+        self.fps_max = None
+        self.last_frame_time = None
+        self.vcap = None
+        self.seek_percentage = None
+        self.seek_frame = None
+        self.osd_elements = None
         state.brightness = 1.0
 
         # dragpos is the top left position in image coordinates
@@ -261,7 +430,7 @@ class MPImagePanel(wx.Panel):
         # panel for the main image
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            self.imagePanel = mp_widgets.ImagePanel(self, wx.EmptyImage(state.width,state.height))
+            self.imagePanel = mp_widgets.ImagePanel(self, wx.EmptyImage(int(state.width),int(state.height)))
         self.mainSizer.Add(self.imagePanel, flag=wx.TOP|wx.LEFT|wx.GROW, border=0)
         if state.mouse_events:
             self.imagePanel.Bind(wx.EVT_MOUSE_EVENTS, self.on_event)
@@ -295,12 +464,15 @@ class MPImagePanel(wx.Panel):
             self.mainSizer.Fit(self)
             self.Refresh()
             state.frame.Refresh()
-            self.SetFocus()
+            #self.SetFocus()
             return
 
         # get the current size of the containing window frame
         size = self.frame.GetSize()
         (width, height) = (self.img.GetWidth(), self.img.GetHeight())
+
+        if self.zoom <= 0:
+            self.zoom = 1
 
         rect = wx.Rect(self.dragpos.x, self.dragpos.y, int(size.x/self.zoom), int(size.y/self.zoom))
 
@@ -317,7 +489,10 @@ class MPImagePanel(wx.Panel):
 
         scaled_image = self.img.Copy()
         scaled_image = scaled_image.GetSubImage(rect);
-        scaled_image = scaled_image.Rescale(int(rect.width*self.zoom), int(rect.height*self.zoom))
+        iw,ih = int(rect.width*self.zoom), int(rect.height*self.zoom)
+        if iw <= 0 or ih <= 0:
+            return
+        scaled_image = scaled_image.Rescale(iw, ih)
         if state.brightness != 1.0:
             try:
                 from PIL import Image
@@ -337,13 +512,68 @@ class MPImagePanel(wx.Panel):
         self.mainSizer.Fit(self)
         self.Refresh()
         state.frame.Refresh()
-        self.SetFocus()
+        #self.SetFocus()
         '''
         from guppy import hpy
         h = hpy()
         print(h.heap())
         '''
 
+    def draw_osd(self, data):
+        '''draw OSD elements on the image'''
+        for obj in self.osd_elements.values():
+            data = obj.draw(data)
+        return data
+
+    def set_image_data(self, data, width, height):
+        '''set image data'''
+        state = self.state
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            img = wx.EmptyImage(width, height)
+
+        self.raw_img = data
+
+        if self.colormap is not None:
+            '''optional colormap for greyscale data'''
+            if isinstance(self.colormap, str):
+                cmap = getattr(cv2, "COLORMAP_" + self.colormap, None)
+                if cmap is not None:
+                    data = cv2.cvtColor(data, cv2.COLOR_BGR2GRAY)
+                    data = cv2.applyColorMap(data, cmap)
+            elif isinstance(self.colormap, dict):
+                if self.colormap_index is not None:
+                    cmap = self.colormap.get(self.colormap_index,None)
+                    if cmap is not None:
+                        data = cv2.LUT(data, cmap)
+            else:
+                data = cv2.LUT(data, self.colormap)
+
+        if self.osd_elements is not None:
+            data = self.draw_osd(data)
+
+        #cv2.imwrite("x.jpg", data)
+        img.SetData(data)
+        self.img = img
+        if state.auto_size:
+            client_area = state.frame.GetClientSize()
+            total_area = state.frame.GetSize()
+            bx = max(total_area.x - client_area.x,0)
+            by = max(total_area.y - client_area.y,0)
+            state.frame.SetSize(wx.Size(width+bx, height+by))
+        elif state.auto_fit:
+            self.fit_to_window()
+        self.need_redraw = True
+
+    def handle_osd(self, obj):
+        '''handle an OSD element'''
+        if self.osd_elements is None:
+            from collections import OrderedDict
+            self.osd_elements = OrderedDict()
+        if isinstance(obj, MPImageOSD_None):
+            self.osd_elements.pop(obj.label,None)
+            return
+        self.osd_elements[obj.label] = obj
 
     def on_redraw_timer(self, event):
         '''the redraw timer ensures we show new map tiles as they
@@ -355,19 +585,10 @@ class MPImagePanel(wx.Panel):
             except Exception:
                 time.sleep(0.05)
                 return
+            if isinstance(obj, MPImageOSD_Element):
+                self.handle_osd(obj)
             if isinstance(obj, MPImageData):
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    img = wx.EmptyImage(obj.width, obj.height)
-                img.SetData(obj.data)
-                self.img = img
-                self.need_redraw = True
-                if state.auto_size:
-                    client_area = state.frame.GetClientSize()
-                    total_area = state.frame.GetSize()
-                    bx = max(total_area.x - client_area.x,0)
-                    by = max(total_area.y - client_area.y,0)
-                    state.frame.SetSize(wx.Size(obj.width+bx, obj.height+by))
+                self.set_image_data(obj.data, obj.width, obj.height)
             if isinstance(obj, MPImageTitle):
                 state.frame.SetTitle(obj.title)
             if isinstance(obj, MPImageRecenter):
@@ -385,14 +606,130 @@ class MPImagePanel(wx.Panel):
                 self.fit_to_window()
             if isinstance(obj, win_layout.WinLayout):
                 win_layout.set_wx_window_layout(state.frame, obj)
-                
+            if isinstance(obj, MPImageGStreamer):
+                self.start_gstreamer(obj.pipeline)
+            if isinstance(obj, MPImageVideo):
+                self.start_video(obj.filename)
+            if isinstance(obj, MPImageFPSMax):
+                self.fps_max = obj.fps_max
+                print("FPS_MAX: ", self.fps_max)
+            if isinstance(obj, MPImageSeekPercent):
+                self.seek_video(obj.percent)
+            if isinstance(obj, MPImageSeekFrame):
+                self.seek_video_frame(obj.frame)
+            if isinstance(obj, MPImageColormap):
+                self.colormap = obj.colormap
+            if isinstance(obj, MPImageColormapIndex):
+                self.colormap_index = obj.colormap_index
+            if isinstance(obj, MPImageStartTracker):
+                self.start_tracker(obj)
+            if isinstance(obj, MPImageEndTracker):
+                self.tracker = None
+
         if self.need_redraw:
             self.redraw()
 
+    def start_tracker(self, obj):
+        '''start a tracker on an object identified by a box'''
+        if self.raw_img is None:
+            return
+        self.tracker = None
+        import dlib
+        maxx = self.raw_img.shape[1]-1
+        maxy = self.raw_img.shape[0]-1
+        rect = dlib.rectangle(max(int(obj.x-obj.width/2),0),
+                              max(int(obj.y-obj.height/2),0),
+                              min(int(obj.x+obj.width/2),maxx),
+                              min(int(obj.y+obj.height/2),maxy))
+        tracker = dlib.correlation_tracker()
+        tracker.start_track(self.raw_img, rect)
+        self.tracker = tracker
+
+
+    def start_gstreamer(self, pipeline):
+        '''start a gstreamer pipeline'''
+        thread = Thread(target=self.video_thread, args=(pipeline,cv2.CAP_GSTREAMER))
+        thread.daemon = True
+        thread.start()
+
+    def start_video(self, filename):
+        '''start a video'''
+        thread = Thread(target=self.video_thread, args=(filename,0))
+        thread.daemon = True
+        thread.start()
+
+    def seek_video(self, percentage):
+        '''seek to given percentage'''
+        self.seek_percentage = percentage
+
+    def seek_video_frame(self, frame):
+        '''seek to given frame'''
+        self.seek_frame = frame
+        
+    def video_thread(self, url, cap_options):
+        '''thread for video capture'''
+        self.vcap = cv2.VideoCapture(url, cap_options)
+        if not self.vcap or not self.vcap.isOpened():
+            print("VideoCapture failed")
+            return
+
+        while True:
+            if self.seek_percentage is not None:
+                frame_count = self.vcap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if frame_count > 0:
+                    pos = int(frame_count*self.seek_percentage*0.01)
+                    self.vcap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+                    self.seek_percentage = None
+            if self.seek_frame is not None:
+                self.vcap.set(cv2.CAP_PROP_POS_FRAMES, self.seek_frame)
+                self.seek_frame = None
+            try:
+                _, frame = self.vcap.read()
+            except Exception as ex:
+                print(ex)
+                break
+            if frame is None:
+                break
+            frame_count = int(self.vcap.get(cv2.CAP_PROP_POS_FRAMES))
+            if frame_count % 5 == 0:
+                self.state.out_queue.put(MPImageFrameCounter(frame_count))
+
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            (width, height) = (frame.shape[1], frame.shape[0])
+            if self.tracker:
+                self.tracker.update(frame)
+                pos = self.tracker.get_position()
+                if pos is not None:
+                    startX = int(pos.left())
+                    startY = int(pos.top())
+                    endX = int(pos.right())
+                    endY = int(pos.bottom())
+                    if (startX >= 0
+                        and startY >= 0
+                        and endX < width
+                        and endY < height
+                        and endX > startX
+                        and endY > startY):
+                        cv2.rectangle(frame, (startX, startY), (endX, endY), (0,255,0), 2)
+                        self.state.out_queue.put(MPImageTrackPos(int((startX+endX)/2),
+                                                                 int((startY+endY)/2),
+                                                                frame.shape))
+            self.set_image_data(frame, width, height)
+            if self.fps_max is not None:
+                while self.fps_max <= 0:
+                    time.sleep(0.1)
+                now = time.time()
+                if self.last_frame_time is not None:
+                    dt = now - self.last_frame_time
+                    if dt < 1.0 / self.fps_max:
+                        time.sleep((1.0 / self.fps_max)-dt)
+                self.last_frame_time = now
+
+
     def on_recenter(self, location):
         client_area = self.state.frame.GetClientSize()
-        self.dragpos.x = location[0] - client_area.x/2
-        self.dragpos.y = location[1] - client_area.y/2
+        self.dragpos.x = int(location[0] - client_area.x*0.5)
+        self.dragpos.y = int(location[1] - client_area.y*0.5)
         self.limit_dragpos()
         self.need_redraw = True
         self.redraw()
@@ -400,6 +737,8 @@ class MPImagePanel(wx.Panel):
     def on_size(self, event):
         '''handle window size changes'''
         state = self.state
+        if state.auto_fit and self.img is not None:
+            self.fit_to_window()
         self.need_redraw = True
         if state.report_size_changes:
             # tell owner the new size
@@ -512,13 +851,21 @@ class MPImagePanel(wx.Panel):
                 any_button_down = event.ButtonIsDown(wx.MOUSE_BTN_ANY)
             else:
                 any_button_down = event.leftIsDown or event.rightIsDown
-            if not any_button_down and event.GetWheelRotation() == 0:
+            if not any_button_down and event.GetWheelRotation() == 0 and not self.state.mouse_movement_events:
                 # don't flood the queue with mouse movement
                 return
         evt = mp_util.object_container(event)
         pt = self.image_coordinates(wx.Point(evt.X,evt.Y))
         evt.X = pt.x
         evt.Y = pt.y
+        evt.pixel = None
+        if self.raw_img is not None and hasattr(self.raw_img, 'shape'):
+            # provide the pixel value if available
+            (width, height) = (self.raw_img.shape[1], self.raw_img.shape[0])
+            if evt.X >= 0 and evt.Y >= 0 and evt.X < width and evt.Y < height:
+                evt.pixel = self.raw_img[evt.Y][evt.X]
+            evt.shape = self.raw_img.shape
+
         state.out_queue.put(evt)
 
     def on_menu(self, event):
@@ -578,24 +925,39 @@ if __name__ == "__main__":
     parser.add_option("--zoom", action='store_true', default=False, help="allow zoom")
     parser.add_option("--drag", action='store_true', default=False, help="allow drag")
     parser.add_option("--autosize", action='store_true', default=False, help="auto size window")
+    parser.add_option("--autofit", action='store_true', default=False, help="auto fit window")
+    parser.add_option("--gstreamer", action='store_true', default=False, help="treat file as gstreamer pipeline")
+    parser.add_option("--colormap", type=str, default=None, help="set colormap for greyscale images")
     (opts, args) = parser.parse_args()
 
     im = MPImage(mouse_events=True,
                  key_events=True,
                  can_drag = opts.drag,
                  can_zoom = opts.zoom,
-                 auto_size = opts.autosize)
-    img = cv2.imread(args[0])
-    im.set_image(img, bgr=True)
+                 auto_size = opts.autosize,
+                 auto_fit = opts.autofit)
+    if opts.gstreamer:
+        im.set_gstreamer(args[0])
+    else:
+        img = cv2.imread(args[0])
+        #img = twiddle_color(img)
+        im.set_image(img, bgr=True)
+
+    if opts.colormap is not None:
+        im.set_colormap(opts.colormap)
 
     while im.is_alive():
         for event in im.events():
             if isinstance(event, MPMenuItem):
                 print(event)
                 continue
-            print(event.ClassName)
+            if isinstance(event, MPImageTrackPos):
+                continue
             if event.ClassName == 'wxMouseEvent':
-                print('mouse', event.X, event.Y)
+                if event.leftIsDown and event.shiftDown:
+                    im.start_tracker(event.X, event.Y, 50, 50)
+                if event.leftIsDown and event.controlDown:
+                    im.end_tracking()
             if event.ClassName == 'wxKeyEvent':
                 print('key %u' % event.KeyCode)
         time.sleep(0.1)

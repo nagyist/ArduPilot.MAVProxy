@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 gimbal control module
 Andrew Tridgell
@@ -14,6 +14,7 @@ from pymavlink.rotmat import Vector3, Matrix3, Plane, Line
 from math import radians
 if mp_util.has_wxpython:
     from MAVProxy.modules.lib.mp_menu import *
+import pymavlink
 
 class GimbalModule(mp_module.MPModule):
     def __init__(self, mpstate):
@@ -90,14 +91,20 @@ class GimbalModule(mp_module.MPModule):
             print("No map click position available and no parameters set")
             return
         elif latlon is None:
-            print("usage: gimbal roi [LAT LON ALT]")
+            print("usage: gimbal roi [LAT LON RELHOMEALT]")
             return
-        self.master.mav.mount_control_send(self.target_system,
-                                           self.target_component,
-                                           int(latlon[0]*1e7),
-                                           int(latlon[1]*1e7),
-                                           int(alt),
-                                           0)
+        self.master.mav.command_long_send(
+            self.settings.target_system,
+            self.settings.target_component,
+            mavutil.mavlink.MAV_CMD_DO_MOUNT_CONTROL,
+            0, # confirmation
+            0, # param1
+            0, # param2
+            0, # param3
+            alt, # param4 - alt (exception to the usual rule about where this goes)
+            int(latlon[0]*1e7), # lat
+            int(latlon[1]*1e7), # lon
+            mavutil.mavlink.MAV_MOUNT_MODE_GPS_POINT) # param7
 
     def cmd_gimbal_roi_vel(self, args):
         '''control roi position and velocity'''
@@ -138,11 +145,16 @@ class GimbalModule(mp_module.MPModule):
             print("usage: gimbal rate ROLL PITCH YAW")
             return
         (roll, pitch, yaw) = (float(args[0]), float(args[1]), float(args[2]))
-        self.master.mav.gimbal_control_send(self.target_system,
-                                            mavutil.mavlink.MAV_COMP_ID_GIMBAL,
-                                            radians(roll),
-                                            radians(pitch),
-                                            radians(yaw))
+        self.master.mav.gimbal_manager_set_attitude_send(
+            self.target_system,
+            self.target_component,
+            0,  # flags
+            0,  # instance, 0 is primary
+            [float("NaN"), float("NaN"), float("NaN"), float("NaN")],
+            radians(roll),
+            radians(pitch),
+            radians(yaw)
+        )
 
     def cmd_gimbal_point(self, args):
         '''control gimbal pointing'''
@@ -150,12 +162,18 @@ class GimbalModule(mp_module.MPModule):
             print("usage: gimbal point ROLL PITCH YAW")
             return
         (roll, pitch, yaw) = (float(args[0]), float(args[1]), float(args[2]))
-        self.master.mav.mount_control_send(self.target_system,
-                                           self.target_component,
-                                           int(pitch*100),
-                                           int(roll*100),
-                                           int(yaw*100),
-                                           0)
+        self.master.mav.command_long_send(
+            self.settings.target_system,
+            self.settings.target_component,
+            mavutil.mavlink.MAV_CMD_DO_MOUNT_CONTROL,
+            0, # confirmation
+            pitch, # param1
+            roll, # param2
+            yaw, # param3
+            0, # param4
+            0, # lat
+            0, # lon
+            mavutil.mavlink.MAV_MOUNT_MODE_MAVLINK_TARGETING) # param7
 
     def cmd_gimbal_status(self, args):
         '''show gimbal status'''
@@ -172,24 +190,31 @@ class GimbalModule(mp_module.MPModule):
             # don't draw if no map
             return
 
-        if m.get_type() != 'GIMBAL_REPORT':
-            return
-
-        needed = ['ATTITUDE', 'GLOBAL_POSITION_INT']
-        for n in needed:
+        for n in frozenset(['ATTITUDE', 'GLOBAL_POSITION_INT']):
             if not n in self.master.messages:
                 return
+
+        gpi = self.master.messages['GLOBAL_POSITION_INT']
+        att = self.master.messages['ATTITUDE']
+
+        rotmat_copter_gimbal = Matrix3()
+        if m.get_type() == 'GIMBAL_REPORT':
+            rotmat_copter_gimbal.from_euler312(m.joint_roll, m.joint_el, m.joint_az)
+        elif m.get_type() == 'GIMBAL_DEVICE_ATTITUDE_STATUS':
+            r, p, y = pymavlink.quaternion.Quaternion(m.q).euler
+            # rotate back from earth-frame on roll and pitch to body-frame
+            r -= att.roll
+            p -= att.pitch
+            rotmat_copter_gimbal.from_euler(r, p, y)
+        else:
+            return
 
         # clear the camera icon
         self.mpstate.map.add_object(mp_slipmap.SlipClearLayer('GimbalView'))
 
-        gpi = self.master.messages['GLOBAL_POSITION_INT']
-        att = self.master.messages['ATTITUDE']
         vehicle_dcm = Matrix3()
         vehicle_dcm.from_euler(att.roll, att.pitch, att.yaw)
 
-        rotmat_copter_gimbal = Matrix3()
-        rotmat_copter_gimbal.from_euler312(m.joint_roll, m.joint_el, m.joint_az)
         gimbal_dcm = vehicle_dcm * rotmat_copter_gimbal
 
         lat = gpi.lat * 1.0e-7

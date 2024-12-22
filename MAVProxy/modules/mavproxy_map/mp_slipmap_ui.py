@@ -4,6 +4,7 @@ from MAVProxy.modules.lib import mp_elevation
 import numpy as np
 import os
 import time
+import copy
 
 from ..lib.wx_loader import wx
 
@@ -55,7 +56,7 @@ class MPSlipMapFrame(wx.Frame):
         state.grid = True
         state.follow = True
         state.download = True
-        state.popup_object = None
+        state.popup_objects = None
         state.popup_latlon = None
         state.popup_started = False
         state.default_popup = None
@@ -110,16 +111,17 @@ class MPSlipMapFrame(wx.Frame):
         '''handle menu selection'''
         state = self.state
         # see if it is a popup menu
-        if state.popup_object is not None:
-            obj = state.popup_object
-            ret = obj.popup_menu.find_selected(event)
-            if ret is not None:
-                ret.call_handler()
-                state.event_queue.put(SlipMenuEvent(state.popup_latlon, event,
-                                                    [SlipObjectSelection(obj.key, 0, obj.layer, obj.selection_info())],
-                                                    ret))
-                state.popup_object = None
-                state.popup_latlon = None
+        if state.popup_objects is not None:
+            for obj in state.popup_objects:
+                ret = obj.popup_menu.find_selected(event)
+                if ret is not None:
+                    ret.call_handler()
+                    state.event_queue.put(SlipMenuEvent(state.popup_latlon, event,
+                                                        [SlipObjectSelection(obj.key, 0, obj.layer, obj.selection_info())],
+                                                        ret))
+                    break
+            state.popup_objects = None
+            state.popup_latlon = None
         if state.default_popup is not None:
             ret = state.default_popup.popup.find_selected(event)
             if ret is not None:
@@ -351,6 +353,8 @@ class MPSlipMapPanel(wx.Panel):
         self.mouse_down = None
         self.click_pos = None
         self.last_click_pos = None
+        self.last_click_pos_used_for_text = None
+        self.last_terrain_height = None
         if state.elevation != "None":
             state.ElevationMap = mp_elevation.ElevationModel(database=state.elevation)
 
@@ -484,21 +488,61 @@ class MPSlipMapPanel(wx.Panel):
         if alt == -1:
             newtext += ' SRTM Downloading '
         newtext += '\n'
-        if self.click_pos is not None:
-            newtext += 'Click: %.8f %.8f (%s %s) (%s)' % (self.click_pos[0], self.click_pos[1],
-                                                      mp_util.degrees_to_dms(self.click_pos[0]),
-                                                      mp_util.degrees_to_dms(self.click_pos[1]),
-                                                      mp_util.latlon_to_grid(self.click_pos))
+
+        cpt = self.click_position_text()
+        if cpt is not None:
+            newtext += cpt
+
+        if newtext != self.state.oldtext:
+            self.position.Clear()
+            self.position.WriteText(newtext)
+            self.state.oldtext = newtext
+
+    def click_position_text(self):
+        if self.click_pos is None:
+            return None
+        if self.click_pos == self.last_click_pos:
+            return self.last_click_position_text
+
+        if self.click_pos == self.last_click_pos_used_for_text:
+            return self.last_click_position_text
+
+        terrain_height = None
+        terrain_height_str = "?"
+        if self.state.elevation != "None":
+            terrain_height = self.state.ElevationMap.GetElevation(self.click_pos[0], self.click_pos[1])
+            if terrain_height is not None:
+                terrain_height_str = ' %.1fm' % (terrain_height,)
+
+        newtext = 'Click: %.8f %.8f %s (%s %s) (%s)' % (
+            self.click_pos[0],
+            self.click_pos[1],
+            terrain_height_str,
+            mp_util.degrees_to_dms(self.click_pos[0]),
+            mp_util.degrees_to_dms(self.click_pos[1]),
+            mp_util.latlon_to_grid(self.click_pos)
+        )
+
         if self.last_click_pos is not None:
+            # provide information about the differences between the
+            # previous click position:
             distance = mp_util.gps_distance(self.last_click_pos[0], self.last_click_pos[1],
                                             self.click_pos[0], self.click_pos[1])
             bearing = mp_util.gps_bearing(self.last_click_pos[0], self.last_click_pos[1],
                                             self.click_pos[0], self.click_pos[1])
             newtext += '  Distance: %.3fm %.3fnm Bearing %.1f' % (distance, distance*0.000539957, bearing)
-        if newtext != state.oldtext:
-            self.position.Clear()
-            self.position.WriteText(newtext)
-            state.oldtext = newtext
+            if terrain_height_str == "?":
+                self.last_terrain_height = None
+            else:
+                if self.last_terrain_height is not None:
+                    delta = terrain_height - self.last_terrain_height
+                    newtext += " (height %f)" % (delta, )
+        self.last_terrain_height = terrain_height
+        self.last_click_pos_used_for_text = self.click_pos
+
+        self.last_click_position_text = newtext
+
+        return newtext
 
     def pixel_coords(self, latlon, reverse=False):
         '''return pixel coordinates in the map image for a (lat,lon)
@@ -570,7 +614,6 @@ class MPSlipMapPanel(wx.Panel):
         self.mainSizer.Fit(self)
         self.Refresh()
         self.last_view = self.current_view()
-        self.SetFocus()
         state.need_redraw = False
 
     def on_redraw_timer(self, event):
@@ -615,18 +658,21 @@ class MPSlipMapPanel(wx.Panel):
         selected.sort(key=lambda c: c.distance)
         return selected
 
-    def show_popup(self, selected, pos):
+    def show_popup(self, objs, pos):
         '''show popup menu for an object'''
         state = self.state
-        if selected.popup_menu is not None:
-            import copy
-            popup_menu = selected.popup_menu
-            if state.default_popup is not None and state.default_popup.combine:
+        popup_menu = None
+        popups = [ p.popup_menu for p in objs ]
+        if state.default_popup is not None and state.default_popup.combine:
+            popups.append(state.default_popup.popup)
+        popup_menu = popups[0]
+        if len(popups) > 1:
+            for p in popups[1:]:
                 popup_menu = copy.deepcopy(popup_menu)
                 popup_menu.add(MPMenuSeparator())
-                popup_menu.combine(state.default_popup.popup)
-            wx_menu = popup_menu.wx_menu()
-            state.frame.PopupMenu(wx_menu, pos)
+                popup_menu.combine(p)
+        wx_menu = popup_menu.wx_menu()
+        state.frame.PopupMenu(wx_menu, pos)
 
     def show_default_popup(self, pos):
         '''show default popup menu'''
@@ -660,14 +706,14 @@ class MPSlipMapPanel(wx.Panel):
             selected = self.selected_objects(pos)
             state.event_queue.put(SlipMouseEvent(latlon, event, selected))
             if event.RightDown():
-                state.popup_object = None
+                state.popup_objects = None
                 state.popup_latlon = None
                 if len(selected) > 0:
-                    obj = state.layers[selected[0].layer][selected[0].objkey]
-                    if obj.popup_menu is not None:
-                        state.popup_object = obj
+                    objs = [ state.layers[s.layer][s.objkey] for s in selected if state.layers[s.layer][s.objkey].popup_menu is not None ]
+                    if len(objs) > 0:
+                        state.popup_objects = objs
                         state.popup_latlon = latlon
-                        self.show_popup(obj, pos)
+                        self.show_popup(objs, pos)
                         state.popup_started = True
                 if not state.popup_started and state.default_popup is not None:
                     state.popup_latlon = latlon
@@ -702,7 +748,7 @@ class MPSlipMapPanel(wx.Panel):
         '''clear all thumbnails from the map'''
         state = self.state
         for l in state.layers:
-            keys = state.layers[l].keys()[:]
+            keys = list(state.layers[l].keys())[:]
             for key in keys:
                 if (isinstance(state.layers[l][key], SlipThumbnail)
                     and not isinstance(state.layers[l][key], SlipIcon)):

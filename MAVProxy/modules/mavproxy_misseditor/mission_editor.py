@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 mission editor module
 Michael Day
@@ -124,6 +124,7 @@ class MissionEditorEventThread(threading.Thread):
 
                     elif event_type == me_event.MEE_WRITE_WPS:
                         self.module('wp').wploader.clear()
+                        self.module('wp').wploader.expected_count = event.get_arg("count")
                         self.master().waypoint_count_send(event.get_arg("count"))
                         self.mp_misseditor.num_wps_expected = event.get_arg("count")
                         self.mp_misseditor.wps_received = {}
@@ -151,17 +152,6 @@ class MissionEditorEventThread(threading.Thread):
 
                     elif event_type == me_event.MEE_LOAD_WP_FILE:
                         self.module('wp').cmd_wp(['load',event.get_arg("path")])
-                        #Wait for the other thread to finish loading waypoints.
-                        #don't let this loop run forever in case we have a lousy
-                        #link to the plane
-                        i = 0
-                        while (i < 10 and
-                               self.module('wp').loading_waypoints):
-                            time.sleep(1)
-                            i = i + 1
-
-                            #don't modify queue while in the middile of processing it:
-                            request_read_after_processing_queue = True
 
                     elif event_type == me_event.MEE_SAVE_WP_FILE:
                         self.module('wp').cmd_wp(['save',event.get_arg("path")])
@@ -268,7 +258,7 @@ class MissionEditorMain(object):
             m.mission_type != mavutil.mavlink.MAV_MISSION_TYPE_MISSION):
             return
         mtype = m.get_type()
-        if mtype in ['WAYPOINT_COUNT','MISSION_COUNT', 'WAYPOINT', 'MISSION_ITEM', 'MISSION_ITEM_INT']:
+        if mtype in ['MISSION_COUNT', 'MISSION_ITEM', 'MISSION_ITEM_INT']:
             if mtype == 'MISSION_ITEM_INT':
                 m = self.mpstate.module('wp').wp_from_mission_item_int(m)
             self.mavlink_message_queue.put(m)
@@ -282,7 +272,7 @@ class MissionEditorMain(object):
         if (getattr(m, 'mission_type', None) is not None and
             m.mission_type != mavutil.mavlink.MAV_MISSION_TYPE_MISSION):
             return
-        if mtype in ['WAYPOINT_COUNT','MISSION_COUNT']:
+        if mtype in ['MISSION_COUNT']:
             if (self.num_wps_expected == 0):
                 #I haven't asked for WPs, or these messages are duplicates
                 #of msgs I've already received.
@@ -300,11 +290,11 @@ class MissionEditorMain(object):
             #write has been sent by the mission editor:
             elif (self.num_wps_expected > 1):
                 if (m.count != self.num_wps_expected):
-                    self.mpstate.console.error("Unexpected waypoint count from vehicle after write (Editor)")
+                    self.mpstate.console.error("wpedit: mission is stale")
                 #since this is a write operation from the Editor there
                 #should be no need to update number of table rows
 
-        elif mtype in ['WAYPOINT', 'MISSION_ITEM']:
+        elif mtype in ['MISSION_ITEM']:
             #still expecting wps?
             if (len(self.wps_received) < self.num_wps_expected):
                 #if we haven't already received this wp, write it to the GUI:
@@ -316,6 +306,12 @@ class MissionEditorMain(object):
                         lat=m.x,lon=m.y,alt=m.z,frame=m.frame))
 
                     self.wps_received[m.seq] = True
+                    if len(self.wps_received) == self.num_wps_expected:
+                        # if we have received everything then reset
+                        # our state to indicate we're not currently
+                        # expecting waypoints.  That way if we receive
+                        # a count we don't expect we don't spew errors
+                        self.num_wps_expected = -1
 
     def child_task(self, q, l, gq, gl, cw_sem, elemodel):
         '''child process - this holds GUI elements'''

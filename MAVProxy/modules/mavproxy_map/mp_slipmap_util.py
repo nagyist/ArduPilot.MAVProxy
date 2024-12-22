@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''
 slipmap based on mp_tile
@@ -91,15 +91,16 @@ class SlipObject:
 
 class SlipLabel(SlipObject):
     '''a text label to display on the map'''
-    def __init__(self, key, point, label, layer, colour):
+    def __init__(self, key, point, label, layer, colour, size=0.5):
         SlipObject.__init__(self, key, layer)
         self.point = point
         self.colour = colour
         self.label = label
+        self.size = size
 
     def draw_label(self, img, pixmapper):
         pix1 = pixmapper(self.point)
-        cv2.putText(img, self.label, pix1, cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.colour)
+        cv2.putText(img, self.label, pix1, cv2.FONT_HERSHEY_SIMPLEX, self.size, self.colour)
 
     def draw(self, img, pixmapper, bounds):
         if self.hidden:
@@ -185,12 +186,31 @@ class SlipCircle(SlipObject):
                       self.color, self.linewidth, 0, reverse = self.reverse).draw(img)
             SlipArrow(self.key, self.layer, (center_px[0]+radius_px, center_px[1]),
                       self.color, self.linewidth, math.pi, reverse = self.reverse).draw(img)
+        # stash some values for determining closest click location
+        self.radius_px = radius_px
+        self.center_px = center_px
 
     def bounds(self):
         '''return bounding box'''
         if self.hidden:
             return None
         return (self.latlon[0], self.latlon[1], 0, 0)
+
+    def clicked(self, px, py):
+        '''check if a click on px,py should be considered a click
+        on the object. Return None if definitely not a click,
+        otherwise return the distance of the click, smaller being nearer
+        '''
+        radius_px = getattr(self, "radius_px", None)
+        if radius_px is None:
+            return
+
+        dx = self.center_px[0] - px
+        dy = self.center_px[1] - py
+        ret = abs(math.sqrt(dx*dx+dy*dy) - radius_px)
+        if ret > 10:  # threshold of within 10 pixels for a click to count
+            return None
+        return ret
 
 class SlipPolygon(SlipObject):
     '''a polygon to display on the map'''
@@ -205,6 +225,9 @@ class SlipPolygon(SlipObject):
         self._selected_vertex = None
         self._has_timestamps = False
         self._showlines = showlines
+
+    def set_colour(self, colour):
+        self.colour = colour
 
     def bounds(self):
         '''return bounding box'''
@@ -263,7 +286,13 @@ class SlipPolygon(SlipObject):
         '''
         if self.hidden:
             return None
-        for i in range(len(self._pix_points)):
+        num_points = len(self._pix_points)
+        if num_points <= 0:
+            return None
+        for idx in range(num_points):
+            # the odd ordering here is to that the home point, which is index 0, is checked last
+            # as home cannot be moved
+            i = (idx+1) % num_points
             if self._pix_points[i] is None:
                 continue
             (pixx,pixy) = self._pix_points[i]
@@ -276,6 +305,31 @@ class SlipPolygon(SlipObject):
         '''extra selection information sent when object is selected'''
         return self._selected_vertex
 
+class UnclosedSlipPolygon(SlipPolygon):
+    '''a polygon to display on the map - but one with no return point or
+    closing vertex'''
+    def draw(self, img, pixmapper, bounds, colour=(0,0,0)):
+        '''draw a polygon on the image'''
+        if self.hidden:
+            return
+        self._pix_points = []
+        for i in range(len(self.points)):
+            if len(self.points[i]) > 2:
+                colour = self.points[i][2]
+            else:
+                colour = self.colour
+            _from = self.points[i]
+            if i+1 == len(self.points):
+                _to = self.points[0]
+            else:
+                _to = self.points[i+1]
+            self.draw_line(
+                img,
+                pixmapper,
+                _from,
+                _to,
+                colour,
+                self.linewidth)
 
 class SlipGrid(SlipObject):
     '''a map grid'''
@@ -303,11 +357,10 @@ class SlipGrid(SlipObject):
         (lat,lon,w,h) = bounds
         # note that w and h are in degrees
         spacing = 1000
+        lat2 = mp_util.constrain(lat+h*0.5,-85,85)
+        lon2 = mp_util.wrap_180(lon+w)
+        dist = mp_util.gps_distance(lat2,lon,lat2,lon2)
         while True:
-            start = mp_util.latlon_round((lat,lon), spacing)
-            lat2 = mp_util.constrain(lat+h*0.5,-85,85)
-            lon2 = mp_util.wrap_180(lon+w)
-            dist = mp_util.gps_distance(lat2,lon,lat2,lon2)
             count = int(dist / spacing)
             if count < 2:
                 spacing /= 10.0
@@ -317,6 +370,8 @@ class SlipGrid(SlipObject):
                 break
 
         count += 10
+
+        start = mp_util.latlon_round((lat,lon), spacing)
 
         for i in range(count):
             # draw vertical lines of constant longitude
@@ -403,6 +458,8 @@ class SlipThumbnail(SlipObject):
         SlipObject.__init__(self, key, layer, popup_menu=popup_menu)
         self.latlon = latlon
         self._img = None
+        if isinstance(img, str):
+            img = mp_tile.mp_icon(img)
         if not hasattr(img, 'shape'):
             img = np.asarray(img[:,:])
         self.original_img = img
