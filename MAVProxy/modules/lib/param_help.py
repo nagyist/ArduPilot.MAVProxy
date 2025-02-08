@@ -13,15 +13,10 @@ class ParamHelp:
     def param_help_download(self):
         '''download XML files for parameters'''
         files = []
-        for vehicle in ['Rover', 'ArduCopter', 'ArduPlane', 'ArduSub', 'AntennaTracker', 'Blimp']:
+        for vehicle in ['Rover', 'ArduCopter', 'ArduPlane', 'ArduSub', 'AntennaTracker', 'Blimp', 'Heli']:
             url = 'http://autotest.ardupilot.org/Parameters/%s/apm.pdef.xml.gz' % vehicle
             path = mp_util.dot_mavproxy("%s.xml" % vehicle)
             files.append((url, path))
-            url = 'http://autotest.ardupilot.org/%s-defaults.parm' % vehicle
-            if vehicle != 'AntennaTracker':
-                # defaults not generated for AntennaTracker ATM
-                path = mp_util.dot_mavproxy("%s-defaults.parm" % vehicle)
-                files.append((url, path))
         try:
             child = multiproc.Process(target=mp_util.download_files, args=(files,))
             child.start()
@@ -96,12 +91,23 @@ class ParamHelp:
 
     def get_Values_from_help(self, help):
         children = help.getchildren()
-        if len(children) == 0:
-            return []
-        vchild = children[0]
-        return vchild.getchildren()
+        for c in children:
+            if str(c).startswith("values"):
+                return c.getchildren()
+        return []
 
     def get_bitmask_from_help(self, help):
+        # check for presence of "bitmask" subtree, use it by preference:
+        children = help.getchildren()
+        for c in children:
+            if str(c).startswith("bitmask"):
+                ret = {}
+                for entry in c.getchildren():
+                    ret[int(entry.get('code'))] = str(entry)
+                return ret
+
+        # "bitmask" subtree not present, split the traditional
+        # "Bitmask" field ourselves:
         if not hasattr(help, 'field'):
             return None
         field = help.field
@@ -126,6 +132,7 @@ class ParamHelp:
         if not param in htree:
             return None
         help = htree[param]
+        remaining_bits = int(value)
         try:
             bitmask = self.get_bitmask_from_help(help)
             if bitmask is not None:
@@ -133,6 +140,10 @@ class ParamHelp:
                 for k in bitmask.keys():
                     if int(value) & (1<<int(k)):
                         v.append(bitmask[k])
+                        remaining_bits &= ~(1<<int(k))
+                for i in range(31):
+                    if remaining_bits & (1<<i):
+                        v.append("Uknownbit%u" % i)
                 return '|'.join(v)
         except Exception as e:
             print(e)
@@ -165,6 +176,9 @@ class ParamHelp:
                 try:
                     print("\n")
                     for f in help.field:
+                        if f.get('name') == 'Bitmask':
+                            # handled specially below
+                            continue
                         print("%s : %s" % (f.get('name'), str(f)))
                 except Exception as e:
                     pass
@@ -173,7 +187,17 @@ class ParamHelp:
                     if len(values):
                         print("\nValues: ")
                         for v in values:
-                            print("\t%s : %s" % (v.get('code'), str(v)))
+                            print("\t%3u : %s" % (int(v.get('code')), str(v)))
+                except Exception as e:
+                    print("Caught exception %s" % repr(e))
+                    pass
+                try:
+                    # note this is a dictionary:
+                    values = self.get_bitmask_from_help(help)
+                    if values is not None and len(values):
+                        print("\nBitmask: ")
+                        for (n, v) in values.items():
+                            print(f"\t{int(n):3d} : {v}")
                 except Exception as e:
                     print("Caught exception %s" % repr(e))
                     pass

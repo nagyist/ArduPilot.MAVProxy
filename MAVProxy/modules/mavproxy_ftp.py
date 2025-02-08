@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''mavlink file transfer support'''
 
 import io
@@ -106,8 +106,8 @@ class FTPModule(mp_module.MPModule):
              ('pkt_loss_tx', int, 0),
              ('pkt_loss_rx', int, 0),
              ('max_backlog', int, 5),
-             ('burst_read_size', int, 110),
-             ('write_size', int, 110),
+             ('burst_read_size', int, 80),
+             ('write_size', int, 80),
              ('write_qsize', int, 5),
              ('retry_time', float, 0.5)])
         self.add_completion_function('(FTPSETTING)',
@@ -147,6 +147,7 @@ class FTPModule(mp_module.MPModule):
         self.write_recv_idx = -1
         self.write_pending = 0
         self.write_last_send = None
+        self.warned_component = False
 
     def cmd_ftp(self, args):
         '''FTP operations'''
@@ -714,6 +715,13 @@ class FTPModule(mp_module.MPModule):
         '''handle a mavlink packet'''
         mtype = m.get_type()
         if mtype == "FILE_TRANSFER_PROTOCOL":
+            if (m.target_system != self.settings.source_system or
+                m.target_component != self.settings.source_component):
+                if m.target_system == self.settings.source_system and not self.warned_component:
+                    self.warned_component = True
+                    print("FTP reply for mavlink component %u" % m.target_component)
+                return
+
             op = self.op_parse(m)
             now = time.time()
             dt = now - self.last_op_time

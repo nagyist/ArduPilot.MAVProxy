@@ -1,7 +1,7 @@
 from setuptools import setup
 import os, platform, sys
 
-version = "1.8.59"
+version = "1.8.71"
 
 def package_files(directory):
     paths = []
@@ -28,7 +28,8 @@ package_data.extend(package_files('MAVProxy/modules/mavproxy_cesium/app'))
 # large numbers of modules like numpy etc which may be already installed
 requirements=['pymavlink>=2.4.14',
               'pyserial>=3.0',
-              'numpy']
+              'numpy',
+              'pynmeagps']
 
 if platform.system() == "Darwin":
     # on MacOS we can have a more complete requirements list
@@ -41,8 +42,9 @@ if platform.system() == "Darwin":
                          'wxPython'])
 
 if platform.system() == "Windows" and sys.version_info >= (3, 0):
-    # on MacOS we can have a more complete requirements list
+    # on Windows we can have a more complete requirements list
     requirements.extend(['prompt_toolkit'])
+    requirements.append('requests')
 elif platform.system() == "Windows":
     requirements.extend(['pyreadline'])
 
@@ -75,6 +77,7 @@ on how to use MAVProxy.''',
       license='GPLv3',
       packages=['MAVProxy',
                 'MAVProxy.modules',
+                'MAVProxy.modules.mavproxy_anufireproject',
                 'MAVProxy.modules.mavproxy_fieldcheck',
                 'MAVProxy.modules.mavproxy_map',
                 'MAVProxy.modules.mavproxy_mmap',
@@ -86,6 +89,8 @@ on how to use MAVProxy.''',
                 'MAVProxy.modules.mavproxy_magical',
                 'MAVProxy.modules.mavproxy_optitrack',
                 'MAVProxy.modules.mavproxy_nokov',
+                'MAVProxy.modules.mavproxy_SIYI',
+                'MAVProxy.modules.mavproxy_chat',
                 'MAVProxy.modules.lib',
                 'MAVProxy.modules.lib.ANUGA',
                 'MAVProxy.modules.lib.MacOS',
@@ -94,10 +99,14 @@ on how to use MAVProxy.''',
       extras_require={
         # restserver module
         'server': ['flask'],
+        'recommended': ['flask', 'PyYAML', 'lxml', 'wxpython',
+                        'pymonocypher', 'openai', 'paho-mqtt',
+                        'piexif', 'pynmea2', 'Pygame', 'Pillow']
       },
       scripts=['MAVProxy/mavproxy.py',
                'MAVProxy/tools/mavflightview.py',
                'MAVProxy/tools/MAVExplorer.py',
+               'MAVProxy/tools/mavpicviewer/mavpicviewer.py',
                'MAVProxy/modules/mavproxy_map/mp_slipmap.py',
                'MAVProxy/modules/mavproxy_map/mp_tile.py'],
       package_data={'MAVProxy':

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''common mavproxy utility functions'''
 
@@ -20,24 +20,36 @@ if platform.system() == 'Windows':
     # auto-detection is failing on windows, for an unknown reason
     has_wxpython = True
 else:
-    import imp
     try:
-        imp.find_module('wx')
-        has_wxpython = True
-    except ImportError as e:
-        pass
+        import importlib
+        try:
+            import importlib.util
+        except ImportError:
+            pass
+
+        if importlib.util.find_spec('wx') is not None:
+            has_wxpython = True
+    except (ImportError, ModuleNotFoundError):
+        import imp
+        try:
+            imp.find_module('wx')
+            has_wxpython = True
+        except ImportError as e:
+            pass
 
 radius_of_earth = 6378100.0 # in meters
 
 def wrap_360(angle):
     '''wrap an angle to 0..360 degrees'''
+    if angle < 0:
+        return 360.0 - math.fmod(abs(angle),360)
     return math.fmod(angle, 360.0)
 
 def wrap_180(angle):
     '''wrap an angle to -180..180 degrees'''
-    if angle >= -180 and angle < 180:
-        return angle
-    a = math.fmod(angle+180, 360.0)-180.0
+    a = wrap_360(angle)
+    if a > 180:
+        a = a - 360
     return a
 
 def gps_distance(lat1, lon1, lat2, lon2):
@@ -433,10 +445,13 @@ def decode_devid(devid, pname):
         0x33 : "INS_ICM40609",
         0x34 : "INS_ICM42688",
         0x35 : "INS_ICM42605",
+        0x36 : "INS_ICM40605",
         0x37 : "INS_IIM42652",
         0x38 : "INS_BMI270",
         0x39 : "INS_BMI085",
         0x3A : "INS_ICM42670",
+        0x3B : "INS_ICM45686",
+        0x3C : "INS_SCHA63T",
         }
 
     baro_types = {
@@ -456,6 +471,11 @@ def decode_devid(devid, pname):
         0x0E : "BARO_MSP",
         0x0F : "BARO_ICP101XX",
         0x10 : "BARO_ICP201XX",
+        0x11 : "BARO_MS5607",
+        0x12 : "BARO_MS5837",
+        0x13 : "BARO_MS5637",
+        0x14 : "BARO_BMP390",
+        0x15 : "BARO_BMP581",
     }
 
     airspeed_types = {
@@ -537,3 +557,16 @@ class mp_position(object):
             time.time() - self.timestamp,
             self.latitude, self.longitude, self.altitude,
             self.ground_speed, self.ground_course)
+
+def get_gps_time(tnow):
+    '''return gps_week and gps_week_ms for current unix time in seconds'''
+    leapseconds = 18
+    SEC_PER_WEEK = 7 * 86400
+    UNIX_TO_GPS_EPOCH = 315964800
+
+    epoch = UNIX_TO_GPS_EPOCH - leapseconds
+    epoch_seconds = int(tnow - epoch)
+    week = int(epoch_seconds) // SEC_PER_WEEK
+    t_ms = int(tnow * 1000) % 1000
+    week_ms = (epoch_seconds % SEC_PER_WEEK) * 1000 + ((t_ms//200) * 200)
+    return week, week_ms

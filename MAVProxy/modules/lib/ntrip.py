@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
  NTRIP client module
  based on client from http://github.com/jcmb/NTRIP
@@ -14,8 +14,9 @@ import select
 from MAVProxy.modules.lib import rtcm3
 import ssl
 from optparse import OptionParser
+from pynmeagps import NMEAMessage, GET
 
-version = 0.1
+version = 0.2
 useragent = "NTRIP MAVProxy/%.1f" % version
 
 
@@ -70,26 +71,8 @@ class NtripClient(object):
             self.ssl = True
 
     def setPosition(self, lat, lon):
-        self.flagN = "N"
-        self.flagE = "E"
-        if lon > 180:
-            lon = (lon-360)*-1
-            self.flagE = "W"
-        elif lon < 0 and lon >= -180:
-            lon = lon*-1
-            self.flagE = "W"
-        elif lon < -180:
-            lon = lon+360
-            self.flagE = "E"
-        else:
-            self.lon = lon
-        if lat < 0:
-            lat = lat*-1
-            self.flagN = "S"
-        self.lonDeg = int(lon)
-        self.latDeg = int(lat)
-        self.lonMin = (lon-self.lonDeg)*60
-        self.latMin = (lat-self.latDeg)*60
+        self.lon = lon
+        self.lat = lat
 
     def getMountPointString(self):
         userstr = self.user
@@ -105,19 +88,28 @@ class NtripClient(object):
         mountPointString += "\r\n"
         return mountPointString
 
-    def getGGAString(self):
-        now = datetime.datetime.utcnow()
-        ggaString = "GPGGA,%02d%02d%04.2f,%02d%011.8f,%1s,%03d%011.8f,%1s,1,05,0.19,+00400,M,%5.3f,M,," % (
-                     now.hour, now.minute, now.second, self.latDeg, self.latMin, self.flagN,
-                     self.lonDeg, self.lonMin, self.flagE, self.height)
-        checksum = self.calculateCheckSum(ggaString)
-        return "$%s*%s\r\n" % (ggaString, checksum)
+    def getGGAByteString(self):
+        gga_msg = NMEAMessage(
+            "GP",
+            "GGA",
+            GET,  # msgmode is expected by this lib
+            lat=self.lat,
+            NS="S" if self.lat < 0 else "N",
+            lon=self.lon,
+            EW="W" if self.lon < 0 else "E",
+            quality=1,
+            numSV=15,
+            HDOP=0,
+            alt=self.height,
+            altUnit="M",
+            sep=0,
+            sepUnit="M",
+            diffAge="",
+            diffStation=0,
+        )
 
-    def calculateCheckSum(self, stringToCheck):
-        xsum_calc = 0
-        for char in stringToCheck:
-            xsum_calc = xsum_calc ^ ord(char)
-        return "%02X" % xsum_calc
+        raw_gga: bytes = gga_msg.serialize()
+        return raw_gga
 
     def get_ID(self):
         '''get ID of last packet'''
@@ -143,6 +135,9 @@ class NtripClient(object):
                     mps = bytearray(mps, 'ascii')
                 try:
                     self.socket.sendall(mps)
+                except ssl.SSLWantReadError:
+                    self.sent_header = False
+                    return None
                 except Exception:
                     self.socket = None
                     return None
@@ -159,6 +154,7 @@ class NtripClient(object):
                 # Ignore non ascii characters in HTTP response
                 casterResponse = str(casterResponse, 'ascii', 'ignore')
             header_lines = casterResponse.split("\r\n")
+            is_ntrip_rev1 = False
             for line in header_lines:
                 if line == "":
                     self.found_header = True
@@ -170,7 +166,14 @@ class NtripClient(object):
                     raise NtripError("Mount Point does not exist")
                 elif line.find(" 200 OK") != -1:
                     # Request was valid
+                    if line == "ICY 200 OK":
+                        is_ntrip_rev1 = True
                     self.send_gga()
+
+            # NTRIP Rev1 allows for responses that do not contain headers and an extra blank line.
+            if is_ntrip_rev1 and not self.found_header:
+                self.found_header = True
+
             return None
         # normal data read
         while True:
@@ -245,9 +248,8 @@ class NtripClient(object):
             print("got: ", len(data))
 
     def send_gga(self):
-        gga = self.getGGAString()
-        if sys.version_info.major >= 3:
-            gga = bytearray(gga, "ascii")
+        gga = self.getGGAByteString()
+
         try:
             self.socket.sendall(gga)
             self.dt_last_gga_sent = time.time()

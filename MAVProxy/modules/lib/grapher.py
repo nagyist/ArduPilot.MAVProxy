@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
  core library for graphing in mavexplorer
@@ -8,12 +8,15 @@ import ast
 import sys, struct, time, os, datetime, platform
 import math, re
 import matplotlib
-if platform.system() != "Darwin" and os.getenv("MPLBACKEND") is None:
+if platform.system() == "Windows":
+    # wxAgg doesn't properly show the graph values in the lower right on Windows
+    matplotlib.use('TkAgg')
+elif platform.system() != "Darwin" and os.getenv("MPLBACKEND") is None:
     # on MacOS we can't set WxAgg here as it conflicts with the MacOS version
     matplotlib.use('WXAgg')
 from math import *
 from pymavlink.mavextra import *
-import pylab
+import matplotlib.pyplot as plt
 from pymavlink import mavutil
 import threading
 import numpy as np
@@ -64,6 +67,20 @@ def timestamp_to_days(timestamp, timeshift=0):
     sec_to_days = 1.0 / (60*60*24)
     return tday_base + (timestamp - tday_basetime) * sec_to_days
 
+class MilliFormatter(matplotlib.dates.AutoDateFormatter):
+    '''tick formatter that shows millisecond resolution'''
+    def __init__(self, locator):
+        super().__init__(locator)
+        # don't show day until much wider range
+        self.scaled[1.0/(24*60)] = self.scaled[1.0/(24*60*60)]
+
+    def __call__(self, x, pos=0):
+        """Return the label for time x at position pos."""
+        v = super().__call__(x,pos=pos)
+        if v.endswith("000"):
+            return v[:-3]
+        return v
+
 class MavGraph(object):
     def __init__(self, flightmode_colourmap=None):
         self.lowest_x = None
@@ -95,16 +112,24 @@ class MavGraph(object):
         self.start_time = None
         graph_num += 1
         self.draw_events = 0
+        self.closing = False
         self.xlim_pipe = None
         self.xlim = None
         self.tday_base = None
         self.tday_basetime = None
         self.title = None
         self.grid = False
+        self.xlim_t = None
         if sys.version_info[0] >= 3:
             self.text_types = frozenset([str,])
         else:
             self.text_types = frozenset([unicode, str])
+        self.max_message_rate = 0
+
+    def set_max_message_rate(self, rate_hz):
+        '''set maximum rate we will graph any message'''
+        self.max_message_rate = rate_hz
+        self.last_message_t = {}
 
     def add_field(self, field):
         '''add another field to plot'''
@@ -168,10 +193,6 @@ class MavGraph(object):
             # convert back to data coords with respect to ax
             ax_coord = inv.transform(display_coord)
             xstr = self.formatter(x)
-            # add in hundredths of seconds, converting from days
-            sec = x * 60 * 60 * 24
-            hsec = int((sec - int(sec))*100)
-            xstr += ".%02u" % hsec
             y2 = ax_coord[1]
             if self.xaxis:
                 return ('x=%.3f Left=%.3f Right=%.3f' % (x, y2, y))
@@ -194,25 +215,10 @@ class MavGraph(object):
             self.flightmode_colourmap[flightmode] = self.next_flightmode_colour()
         return self.flightmode_colourmap[flightmode]
 
-    def setup_xrange(self, xrange):
-        '''setup plotting ticks on x axis'''
-        if self.xaxis:
-            return
-        xrange *= 24 * 60 * 60
-        interval = 1
-        intervals = [ 1, 2, 5, 10, 15, 30, 60, 120, 240, 300, 600,
-                      900, 1800, 3600, 7200, 5*3600, 10*3600, 24*3600 ]
-        for interval in intervals:
-            if xrange / interval < 12:
-                break
-        self.locator = matplotlib.dates.SecondLocator(interval=interval)
-        self.ax1.xaxis.set_major_locator(self.locator)
-
     def xlim_changed(self, axsubplot):
         '''called when x limits are changed'''
         xrange = axsubplot.get_xbound()
         xlim = axsubplot.get_xlim()
-        self.setup_xrange(xrange[1] - xrange[0])
         if self.draw_events == 0:
             # ignore limit change before first draw event
             return
@@ -225,17 +231,21 @@ class MavGraph(object):
         '''called on draw events'''
         self.draw_events += 1
 
+    def close_event(self, evt):
+        '''called on close events'''
+        self.closing = True
+        
     def rescale_yaxis(self, axis):
         '''rescale Y axes to fit'''
-        xdata = axis.lines[0].get_xdata()
-        xlim = axis.get_xlim()
-        xidx1 = np.argmax(xdata > xlim[0])
-        xidx2 = np.argmax(xdata > xlim[1])
-        if xidx2 == 0:
-            xidx2 = len(xdata)-1
         ylim = [None,None]
 
         for line in axis.lines:
+            xdata = line.get_xdata()
+            xlim = axis.get_xlim()
+            xidx1 = np.argmax(xdata > xlim[0])
+            xidx2 = np.argmax(xdata > xlim[1])
+            if xidx2 == 0:
+                xidx2 = len(xdata)-1
             ydata = line.get_ydata()[xidx1:xidx2]
             min_v = np.amin(ydata)
             max_v = np.amax(ydata)
@@ -245,6 +255,8 @@ class MavGraph(object):
                 ylim[1] = max_v
         rng = ylim[1] - ylim[0]
         pad = 0.05 * rng
+        if pad == 0:
+            pad = 0.001 * ylim[0]
         axis.set_ylim((ylim[0]-pad,ylim[1]+pad))
 
     def button_click(self, event):
@@ -257,8 +269,8 @@ class MavGraph(object):
     def plotit(self, x, y, fields, colors=[], title=None, interactive=True):
         '''plot a set of graphs using date for x axis'''
         if interactive:
-            pylab.ion()
-        self.fig = pylab.figure(num=1, figsize=(12,6))
+            plt.ion()
+        self.fig = plt.figure(num=1, figsize=(12,6))
         self.ax1 = self.fig.gca()
         self.ax2 = None
         for i in range(0, len(fields)):
@@ -269,13 +281,17 @@ class MavGraph(object):
                 self.highest_x = x[i][-1]
         if self.highest_x is None or self.lowest_x is None:
             return
-        self.formatter = matplotlib.dates.DateFormatter('%H:%M:%S')
+        self.locator = matplotlib.dates.AutoDateLocator()
+        self.ax1.xaxis.set_major_locator(self.locator)
+        self.formatter = MilliFormatter(self.locator)
         if not self.xaxis:
-            self.setup_xrange(self.highest_x - self.lowest_x)
             self.ax1.xaxis.set_major_formatter(self.formatter)
             self.ax1.callbacks.connect('xlim_changed', self.xlim_changed)
             self.fig.canvas.mpl_connect('draw_event', self.draw_event)
+            self.fig.canvas.mpl_connect('close_event', self.close_event)
         self.fig.canvas.mpl_connect('button_press_event', self.button_click)
+        self.fig.canvas.get_default_filename = lambda: ''.join("graph" if self.title is None else
+                                                               (x if x.isalnum() else '_' for x in self.title)) + '.png'
         empty = True
         ax1_labels = []
         ax2_labels = []
@@ -368,9 +384,9 @@ class MavGraph(object):
             empty = False
             
         if self.grid:
-            pylab.grid()
+            plt.grid()
 
-        if self.show_flightmode:
+        if self.show_flightmode != 0:
             alpha = 0.3
             xlim = self.ax1.get_xlim()
             for i in range(len(self.flightmode_list)):
@@ -390,7 +406,7 @@ class MavGraph(object):
             return
 
         if title is not None:
-            pylab.title(title)
+            plt.title(title)
         else:
             title = fields[0]
         if self.fig.canvas.manager is not None:
@@ -398,18 +414,18 @@ class MavGraph(object):
         else:
             self.fig.canvas.set_window_title(title)
 
-        if self.show_flightmode:
+        if self.show_flightmode != 0:
             mode_patches = []
             for mode in self.modes_plotted.keys():
                 (color, alpha) = self.modes_plotted[mode]
                 mode_patches.append(matplotlib.patches.Patch(color=color,
                                                              label=mode, alpha=alpha*1.5))
             labels = [patch.get_label() for patch in mode_patches]
-            if ax1_labels != []:
-                patches_legend = matplotlib.pyplot.legend(mode_patches, labels, loc=self.legend_flightmode)
+            if ax1_labels != [] and self.show_flightmode != 2:
+                patches_legend = plt.legend(mode_patches, labels, loc=self.legend_flightmode)
                 self.fig.gca().add_artist(patches_legend)
             else:
-                pylab.legend(mode_patches, labels)
+                plt.legend(mode_patches, labels)
 
         if ax1_labels != []:
             self.ax1.legend(ax1_labels,loc=self.legend)
@@ -424,6 +440,7 @@ class MavGraph(object):
                 continue
             f = self.fields[i]
             has_instance = False
+            ins_value = None
             if mtype in self.instance_types[i]:
                 instance_field = getattr(msg,'instance_field',None)
                 if instance_field is None and hasattr(msg,'fmt'):
@@ -441,6 +458,16 @@ class MavGraph(object):
                         mtype_instance_str = '%s["%s"]' % (mtype, getattr(msg, instance_field))
                         f = f.replace(mtype_instance, mtype_instance_str)
                     has_instance = True
+
+            # allow for capping the displayed message rate
+            if self.max_message_rate > 0:
+                mtype_ins = (mtype,ins_value,f)
+                mt = msg._timestamp
+                if mtype_ins in self.last_message_t:
+                    dt = mt - self.last_message_t[mtype_ins]
+                    if dt < 1.0 / self.max_message_rate:
+                        continue
+                self.last_message_t[mtype_ins] = mt
 
             simple = self.simple_field[i]
             v = None
@@ -559,8 +586,9 @@ class MavGraph(object):
 
     def xlim_timer(self):
         '''called every 0.1s to check for xlim change'''
+        if self.closing:
+            return
         self.xlim_change_check(0)
-        threading.Timer(0.1, self.xlim_timer).start()
 
     def process(self, flightmode_selections, _flightmodes, block=True):
         '''process and display graph'''
@@ -578,7 +606,7 @@ class MavGraph(object):
         self.axes = []
         self.first_only = []
         re_caps = re.compile('[A-Z_][A-Z0-9_]+')
-        re_instance = re.compile('([A-Z_][A-Z0-9_]+)\[([0-9A-Z_]+)\]')
+        re_instance = re.compile(r'([A-Z_][A-Z0-9_]+)\[([0-9A-Z_]+)\]')
         for f in self.fields:
             caps = set(re.findall(re_caps, f))
             self.msg_types = self.msg_types.union(caps)
@@ -604,6 +632,8 @@ class MavGraph(object):
 
     def show(self, lenmavlist, block=True, xlim_pipe=None, output=None):
         '''show graph'''
+        if self.closing:
+            return
         if xlim_pipe is not None:
             xlim_pipe[0].close()
         self.xlim_pipe = xlim_pipe
@@ -643,11 +673,14 @@ class MavGraph(object):
             self.ani = matplotlib.animation.FuncAnimation(self.fig, self.xlim_change_check,
                                                           frames=10, interval=20000,
                                                           repeat=True, blit=False)
-            threading.Timer(0.1, self.xlim_timer).start()
+            if self.xlim_t is None:
+                self.xlim_t = self.fig.canvas.new_timer(interval=100)
+                self.xlim_t.add_callback(self.xlim_timer)
+                self.xlim_t.start()
 
         if output is None:
-            pylab.draw()
-            pylab.show(block=block)
+            plt.draw()
+            plt.show(block=block)
         elif output.endswith(".html"):
             import mpld3
             html = mpld3.fig_to_html(self.fig)
@@ -655,7 +688,7 @@ class MavGraph(object):
             f_out.write(html)
             f_out.close()
         else:
-            pylab.savefig(output, bbox_inches='tight', dpi=200)
+            plt.savefig(output, bbox_inches='tight', dpi=200)
 
 if __name__ == "__main__":
     from argparse import ArgumentParser

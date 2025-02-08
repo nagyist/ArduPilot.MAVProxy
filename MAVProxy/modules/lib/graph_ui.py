@@ -3,6 +3,7 @@ from MAVProxy.modules.lib import multiproc
 
 import errno
 import socket
+import copy
 
 graph_count = 1
 
@@ -30,13 +31,15 @@ class Graph_UI(object):
             self.mg.set_title(self.mestate.settings.title)
         else:
             self.mg.set_title(graphdef.name)
+        if self.mestate.settings.max_rate > 0:
+            self.mg.set_max_message_rate(self.mestate.settings.max_rate)
         self.mg.set_marker(self.mestate.settings.marker)
         self.mg.set_condition(self.mestate.settings.condition)
         self.mg.set_xaxis(self.mestate.settings.xaxis)
         self.mg.set_linestyle(self.mestate.settings.linestyle)
         self.mg.set_show_flightmode(self.mestate.settings.show_flightmode)
         self.mg.set_legend(self.mestate.settings.legend)
-        self.mg.add_mav(self.mestate.mlog)
+        self.mg.add_mav(copy.copy(self.mestate.mlog))
         for f in graphdef.expression.split():
             self.mg.add_field(f)
         self.mg.process(self.mestate.flightmode_selections, self.mestate.mlog._flightmodes)

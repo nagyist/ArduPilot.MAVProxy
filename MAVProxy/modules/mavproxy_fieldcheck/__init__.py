@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 CMAC mission control
 Peter Barker
@@ -12,6 +12,9 @@ TODO:
  - ensure parameters are correct
  - add check that battery is within tolerances (chemistry issues...)
  - autodetect numcells being incorrect
+
+AP_FLAKE8_CLEAN
+
 '''
 
 import math
@@ -30,6 +33,7 @@ import pkg_resources
 if mp_util.has_wxpython:
     from MAVProxy.modules.lib.mp_menu import MPMenuItem
     from MAVProxy.modules.lib.mp_menu import MPMenuSubMenu
+
 
 class FieldCheck(object):
     def __init__(self):
@@ -70,17 +74,17 @@ class FieldCheck(object):
     def loadRally(self):
         filepath = self.flightdata_filepath(self.fc_settings.rally_filename)
         rallymod = self.module('rally')
-        rallymod.cmd_rally(["load", filepath])
+        rallymod.cmd_load([filepath])
 
     def loadFoamyFence(self):
         filepath = self.flightdata_filepath(self.fc_settings.fence_filename)
         fencemod = self.module('fence')
-        fencemod.cmd_fence(["load", filepath])
+        fencemod.cmd_load([filepath])
 
     def loadFoamyMission(self, filename):
         filepath = self.flightdata_filepath(filename)
         wpmod = self.module('wp')
-        wpmod.cmd_wp(["load", filepath])
+        wpmod.cmd_load([filepath])
 
     def loadFoamyMissionCW(self):
         self.loadFoamyMission(self.fc_settings.mission_filename_cw)
@@ -105,12 +109,19 @@ class FieldCheck(object):
     def check_parameters(self, fix=False):
         '''check key parameters'''
         want_values = {
-            "FENCE_ACTION": 4,
-            "FENCE_MAXALT": self.fc_settings.param_fence_maxalt,
+            "FENCE_ENABLE": 1,
+            "FENCE_ACTION": 1,  # 4 is break-or-land on Copter!
+            "FENCE_ALT_MAX": self.fc_settings.param_fence_maxalt,
             "THR_FAILSAFE": 1,
             "FS_SHORT_ACTN": 0,
             "FS_LONG_ACTN": 1,
         }
+
+        if self.vehicle_type == mavutil.mavlink.MAV_TYPE_FIXED_WING:
+            want_values["FENCE_ACTION"] = 1  # RTL
+            want_values["RTL_AUTOLAND"] = 2  # go directly to landing sequence
+        elif self.vehicle_type == mavutil.mavlink.MAV_TYPE_QUADROTOR:
+            want_values["FENCE_ACTION"] = 4  # Brake or RTL
 
         ret = True
         for key in want_values.keys():
@@ -126,6 +137,23 @@ class FieldCheck(object):
                     self.whinge('Setting %s to %f' % (key, want))
                     self.mav_param.mavset(self.master, key, want, retries=3)
 
+        # ensure there is a fence enable/disable switch configured:
+        required_options = {
+            11: "Fence Enable/Disable",
+        }
+        for required_option in required_options.keys():
+            found = False
+            for chan in range(1, 17):
+                rc_option_param_name = f"RC{chan}_OPTION"
+                got = self.mav_param.get(rc_option_param_name, None)
+                if got == required_option:
+                    found = True
+                    break
+            if not found:
+                self.whinge("RC channel option %u (%s) must be configured" %
+                            (required_option, required_options[required_option]))
+                ret = False
+
         return ret
 
     def check_fence_location(self):
@@ -133,37 +161,56 @@ class FieldCheck(object):
         if fencemod is None:
             self.whinge("Fence module not loaded")
             return False
-        if not fencemod.have_list:
-            self.whinge("No fence list")
+        if not fencemod.check_have_list():
             if self.is_armed:
                 return False
             now = time.time()
             if now - self.last_fence_fetch > 10:
                 self.last_fence_fetch = now
                 self.whinge("Running 'fence list'")
-                fencemod.list_fence(None)
+                fencemod.cmd_list(None)
             return False
 
-        count = fencemod.fenceloader.count()
-        if count < 6:
-            self.whinge("Too few fence points")
-            return False
-        ret = True
-        for i in range(fencemod.fenceloader.count()):
-            p = fencemod.fenceloader.point(i)
-            loc = mavutil.location(p.lat, p.lng)
+        global fencepoints_good
+        global count
+
+        fencepoints_good = True
+        count = 0
+
+        def fencepoint_checker(offset, p):
+            global fencepoints_good
+            global count
+            if isinstance(p, mavutil.mavlink.MAVLink_mission_item_message):
+                lat = p.x
+                lng = p.y
+            elif isinstance(p, mavutil.mavlink.MAVLink_mission_item_int_message):
+                lat = p.x * 1e-7
+                lng = p.y * 1e-7
+            else:
+                raise TypeError(f"What's a {type(p)}?")
+            loc = mavutil.location(lat, lng)
             dist = self.get_distance(self.location, loc)
             if dist > self.fc_settings.fence_maxdist:
-                self.whinge("Fencepoint %i too far away (%fm)" % (i, dist))
-                ret = False
-        return ret
+                if fencepoints_good:
+                    self.whinge("Fencepoint %i too far away (%fm)" % (offset, dist))
+                fencepoints_good = False
+            count += 1
+
+        fencemod.apply_function_to_points(fencepoint_checker)
+
+        min_fence_points = 5
+        if count < min_fence_points:
+            self.whinge(f"Too few fence points; {count} < {min_fence_points}")
+            return False
+
+        return fencepoints_good
 
     def check_rally(self):
         rallymod = self.module('rally')
         if rallymod is None:
             self.whinge("No rally module")
             return False
-        if not rallymod.have_list:
+        if not rallymod.check_have_list():
             self.whinge("No rally list")
             if self.is_armed:
                 return False
@@ -171,7 +218,7 @@ class FieldCheck(object):
             if now - self.last_rally_fetch > 10:
                 self.last_rally_fetch = now
                 self.whinge("Running 'rally list'")
-                rallymod.cmd_rally(["list"])
+                rallymod.cmd_list([])
             return False
 
         count = rallymod.rally_count()
@@ -327,7 +374,9 @@ class FieldCheck(object):
     def mavlink_packet(self, m):
         '''handle an incoming mavlink packet'''
         if not self.done_heartbeat_check:
-            if self.master.messages.get('HEARTBEAT') is not None:
+            m = self.master.messages.get('HEARTBEAT')
+            if m is not None:
+                self.vehicle_type = m.type
                 self.check()
                 self.done_heartbeat_check = True
 
@@ -371,7 +420,7 @@ class FieldCheck(object):
         self.check_map_menu()
 
     def FC_MPSetting(self, name, atype, default, description):
-        xname = "fc_%s_%s" % (self.lc_name, name)
+        # xname = "fc_%s_%s" % (self.lc_name, name)
         return MPSetting(name, atype, default, description)
 
     def select(self):
@@ -444,17 +493,21 @@ class FieldCheck(object):
             print(usage)
             return
 
+
 class FieldCMAC(FieldCheck):
     lc_name = "cmac"
     location = mavutil.location(-35.363261, 149.165230, 584, 353)
+
 
 class FieldSpringValley(FieldCheck):
     location = mavutil.location(-35.281315, 149.005329, 581, 280)
     lc_name = "springvalley"
 
+
 class FieldSpringValleyBottom(FieldCheck):
     location = mavutil.location(-35.2824450, 149.0053668, 593, 0)
     lc_name = "springvalleybottom"
+
 
 class FieldCheckModule(mp_module.MPModule):
     def __init__(self, mpstate):
@@ -490,7 +543,6 @@ class FieldCheckModule(mp_module.MPModule):
                 self.whinge("Selecting field (%s)" % field.lc_name)
                 self.select_field(field)
 
-
     def idle_task(self):
         '''run periodic tasks'''
         if self.field is not None:
@@ -510,6 +562,7 @@ class FieldCheckModule(mp_module.MPModule):
         if self.field is None:
             return
         self.field.mavlink_packet(m)
+
 
 def init(mpstate):
     '''initialise module'''
